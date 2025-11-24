@@ -9,7 +9,9 @@ import requests
 import time
 import base64
 
+# -------------------------------------------------------
 # Load environment variables
+# -------------------------------------------------------
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -20,30 +22,18 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
-print("Supabase URL:", SUPABASE_URL)
-print("Supabase Service Key loaded:", SUPABASE_SERVICE_KEY is not None)
-print("OpenAI Key loaded:", OPENAI_API_KEY is not None)
-
-# Initialize Supabase
+# -------------------------------------------------------
+# Initialize services
+# -------------------------------------------------------
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
-# Initialize OpenAI
 client = OpenAI(api_key=OPENAI_API_KEY)
-
-print("Testing OpenAI connection...")
-try:
-    test = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": "Hello"}]
-    )
-    print("OpenAI test worked:", test.choices[0].message.content)
-except Exception as e:
-    print("OPENAI STARTUP ERROR:", e)
 
 app = FastAPI()
 
 
-# -------------------- DATA MODELS --------------------
+# -------------------------------------------------------
+# Data Models
+# -------------------------------------------------------
 class EmailPayload(BaseModel):
     inbox_id: str
     sender: str
@@ -58,17 +48,16 @@ class SendEmailRequest(BaseModel):
     message: str
 
 
-# -------------------- STEP 1: Generate Gmail OAuth URL --------------------
-@app.get("/connect/gmail/{client_id}")
-def connect_gmail(client_id: str):
+# -------------------------------------------------------
+# STEP 0 — Gmail Login Endpoint (Fix for Railway)
+# -------------------------------------------------------
+@app.get("/oauth/gmail/login")
+def gmail_login():
 
     if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
-        raise HTTPException(
-            status_code=500,
-            detail="Google OAuth environment variables missing"
-        )
+        raise HTTPException(status_code=500, detail="Missing Google OAuth environment variables")
 
-    oauth_params = {
+    params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": GOOGLE_REDIRECT_URI,
         "response_type": "code",
@@ -77,13 +66,13 @@ def connect_gmail(client_id: str):
         "scope": "https://www.googleapis.com/auth/gmail.send"
     }
 
-    base_url = "https://accounts.google.com/o/oauth2/v2/auth"
-    oauth_url = f"{base_url}?{urllib.parse.urlencode(oauth_params)}"
-
+    oauth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
     return {"oauth_url": oauth_url}
 
 
-# -------------------- STEP 2: OAuth Callback (Token Exchange + Save) --------------------
+# -------------------------------------------------------
+# STEP 1 — OAuth Callback: Exchange code for tokens
+# -------------------------------------------------------
 @app.get("/oauth/gmail/callback")
 async def gmail_callback(code: str):
 
@@ -104,46 +93,51 @@ async def gmail_callback(code: str):
     if "access_token" not in tokens:
         raise HTTPException(status_code=400, detail=tokens)
 
-    # Extract values
     access_token = tokens["access_token"]
-    refresh_token = tokens["refresh_token"]
-    token_type = tokens["token_type"]
-    scope = tokens["scope"]
-    expires_in = tokens["expires_in"]
-    expires_at = int(time.time()) + int(expires_in)
+    refresh_token = tokens.get("refresh_token")
+    expires_at = int(time.time()) + int(tokens["expires_in"])
 
-    # TEMPORARY — until you add real users
+    # TEMPORARY UNTIL USER SYSTEM IS ADDED
     user_email = "prod.tkmusic@gmail.com"
 
     supabase.table("gmail_tokens").insert({
         "user_email": user_email,
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "token_type": token_type,
-        "scope": scope,
+        "token_type": tokens["token_type"],
+        "scope": tokens["scope"],
         "expires_at": expires_at
     }).execute()
 
     return {"status": "saved", "email": user_email}
 
 
-# -------------------- STEP 3: Token Refreshing --------------------
+# -------------------------------------------------------
+# STEP 2 — Refresh Token Logic
+# -------------------------------------------------------
 def refresh_gmail_token(user_email: str):
 
-    result = supabase.table("gmail_tokens").select("*").eq("user_email", user_email).order("created_at", desc=True).limit(1).execute()
+    result = (
+        supabase.table("gmail_tokens")
+        .select("*")
+        .eq("user_email", user_email)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
 
     if not result.data:
-        raise HTTPException(status_code=404, detail="User has no stored Gmail tokens")
+        raise HTTPException(status_code=404, detail="No Gmail tokens found")
 
     record = result.data[0]
 
-    # If token is still valid, return
+    # Token still valid
     if record["expires_at"] > time.time():
         return record["access_token"]
 
     print("Access token expired — refreshing...")
 
-    token_url = "https://oauth2.googleapis.com/token"
+    refresh_url = "https://oauth2.googleapis.com/token"
     data = {
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
@@ -151,17 +145,16 @@ def refresh_gmail_token(user_email: str):
         "grant_type": "refresh_token",
     }
 
-    response = requests.post(token_url, data=data)
-    new_tokens = response.json()
-    print("REFRESH RESPONSE:", new_tokens)
+    response = requests.post(refresh_url, data=data)
+    new_data = response.json()
+    print("REFRESH RESPONSE:", new_data)
 
-    if "access_token" not in new_tokens:
-        raise HTTPException(status_code=400, detail=new_tokens)
+    if "access_token" not in new_data:
+        raise HTTPException(status_code=400, detail=new_data)
 
-    new_access = new_tokens["access_token"]
-    expires_at = int(time.time()) + int(new_tokens["expires_in"])
+    new_access = new_data["access_token"]
+    expires_at = int(time.time()) + int(new_data["expires_in"])
 
-    # Save new token
     supabase.table("gmail_tokens").insert({
         "user_email": user_email,
         "access_token": new_access,
@@ -174,24 +167,22 @@ def refresh_gmail_token(user_email: str):
     return new_access
 
 
-# -------------------- STEP 4: Send Gmail Email --------------------
+# -------------------------------------------------------
+# STEP 3 — Send Gmail Email
+# -------------------------------------------------------
 def send_gmail_message(user_email: str, to_addr: str, subject: str, message_body: str):
 
     access_token = refresh_gmail_token(user_email)
 
-    gmail_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+    api_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
     raw_email = f"To: {to_addr}\r\nSubject: {subject}\r\n\r\n{message_body}"
 
-    encoded_message = base64.urlsafe_b64encode(raw_email.encode("utf-8")).decode("utf-8")
+    encoded = base64.urlsafe_b64encode(raw_email.encode()).decode()
 
-    payload = {"raw": encoded_message}
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    payload = {"raw": encoded}
 
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-
-    response = requests.post(gmail_url, json=payload, headers=headers)
+    response = requests.post(api_url, json=payload, headers=headers)
     print("SEND RESPONSE:", response.json())
 
     if response.status_code != 200:
@@ -200,7 +191,9 @@ def send_gmail_message(user_email: str, to_addr: str, subject: str, message_body
     return response.json()
 
 
-# -------------------- STEP 5: API Endpoint to Send Email --------------------
+# -------------------------------------------------------
+# Public API: Send Email
+# -------------------------------------------------------
 @app.post("/gmail/send")
 def gmail_send(request: SendEmailRequest):
     result = send_gmail_message(
@@ -212,14 +205,15 @@ def gmail_send(request: SendEmailRequest):
     return {"status": "sent", "response": result}
 
 
-# -------------------- EXISTING: EMAIL WEBHOOK --------------------
+# -------------------------------------------------------
+# Email Webhook → AI Reply Generator
+# -------------------------------------------------------
 @app.post("/webhook/email")
 async def process_email(payload: EmailPayload):
 
     system_prompt = (
-        "You are an assistant that writes clear, polite, professional email replies. "
-        "Keep replies concise, friendly, and helpful. "
-        "If you are missing key information, ask for clarification."
+        "You write clear, friendly, professional email replies. "
+        "Keep replies concise and helpful."
     )
 
     user_prompt = f"""
@@ -231,7 +225,7 @@ async def process_email(payload: EmailPayload):
     Body:
     {payload.body}
 
-    Reply in a helpful, polite way.
+    Reply politely and helpfully.
     """
 
     try:
@@ -241,16 +235,12 @@ async def process_email(payload: EmailPayload):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.5,
         )
-
         ai_reply = completion.choices[0].message.content
-        status = "draft"
 
     except Exception as e:
         print("OPENAI ERROR:", e)
-        ai_reply = "There was an error generating a reply."
-        status = "draft"
+        ai_reply = "Error generating reply."
 
     supabase.table("email_logs").insert({
         "inbox_id": payload.inbox_id,
@@ -258,14 +248,16 @@ async def process_email(payload: EmailPayload):
         "subject": payload.subject,
         "body": payload.body,
         "ai_reply": ai_reply,
-        "confidence": 0.8,
-        "status": status
+        "confidence": 0.9,
+        "status": "draft"
     }).execute()
 
-    return {"status": status, "reply": ai_reply}
+    return {"status": "draft", "reply": ai_reply}
 
 
-# -------------------- SERVER ENTRYPOINT --------------------
+# -------------------------------------------------------
+# Uvicorn Entrypoint (Railway Compatible)
+# -------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
