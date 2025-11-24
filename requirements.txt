@@ -40,3 +40,4 @@ typing_extensions==4.15.0
 uvicorn==0.38.0
 websockets==15.0.1
 yarl==1.22.0
+requests==2.31.0
