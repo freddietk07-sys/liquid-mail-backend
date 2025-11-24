@@ -40,7 +40,6 @@ class EmailPayload(BaseModel):
     subject: str
     body: str
 
-
 @app.post("/webhook/email")
 async def process_email(payload: EmailPayload):
 
@@ -95,5 +94,15 @@ async def process_email(payload: EmailPayload):
     }).execute()
 
     return {"status": status, "reply": ai_reply}
+
+
+# ---------------------------------------------------------
+# 🚀 FIX FOR RAILWAY — Correct port binding using $PORT
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))  # Railway gives a dynamic port
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
+
 
 
