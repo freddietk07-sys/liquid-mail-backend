@@ -8,6 +8,7 @@ import os
 import requests
 import time
 import base64
+from datetime import datetime, timedelta, timezone
 
 # -------------------------------------------------------
 # Load environment variables
@@ -30,7 +31,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = FastAPI()
 
-
 # -------------------------------------------------------
 # Data Models
 # -------------------------------------------------------
@@ -49,7 +49,7 @@ class SendEmailRequest(BaseModel):
 
 
 # -------------------------------------------------------
-# STEP 0 — Gmail Login Endpoint (Fix for Railway)
+# STEP 0 — START OAUTH LOGIN
 # -------------------------------------------------------
 @app.get("/oauth/gmail/login")
 def gmail_login():
@@ -71,7 +71,7 @@ def gmail_login():
 
 
 # -------------------------------------------------------
-# STEP 1 — OAuth Callback: Exchange code for tokens
+# STEP 1 — OAUTH CALLBACK: SAVE TOKENS
 # -------------------------------------------------------
 @app.get("/oauth/gmail/callback")
 async def gmail_callback(code: str):
@@ -95,9 +95,11 @@ async def gmail_callback(code: str):
 
     access_token = tokens["access_token"]
     refresh_token = tokens.get("refresh_token")
-    expires_at = int(time.time()) + int(tokens["expires_in"])
 
-    # TEMPORARY UNTIL USER SYSTEM IS ADDED
+    # FIX: TIMESTAMPTZ uses real datetime, not int
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(tokens["expires_in"]))
+
+    # TEMP: Replace later with real user system
     user_email = "prod.tkmusic@gmail.com"
 
     supabase.table("gmail_tokens").insert({
@@ -113,7 +115,7 @@ async def gmail_callback(code: str):
 
 
 # -------------------------------------------------------
-# STEP 2 — Refresh Token Logic
+# STEP 2 — REFRESH TOKEN IF EXPIRED
 # -------------------------------------------------------
 def refresh_gmail_token(user_email: str):
 
@@ -131,8 +133,8 @@ def refresh_gmail_token(user_email: str):
 
     record = result.data[0]
 
-    # Token still valid
-    if record["expires_at"] > time.time():
+    # Token valid?
+    if record["expires_at"] > datetime.now(timezone.utc):
         return record["access_token"]
 
     print("Access token expired — refreshing...")
@@ -153,8 +155,11 @@ def refresh_gmail_token(user_email: str):
         raise HTTPException(status_code=400, detail=new_data)
 
     new_access = new_data["access_token"]
-    expires_at = int(time.time()) + int(new_data["expires_in"])
 
+    # FIX: TIMESTAMPTZ value
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(new_data["expires_in"]))
+
+    # Save updated token
     supabase.table("gmail_tokens").insert({
         "user_email": user_email,
         "access_token": new_access,
@@ -168,7 +173,7 @@ def refresh_gmail_token(user_email: str):
 
 
 # -------------------------------------------------------
-# STEP 3 — Send Gmail Email
+# STEP 3 — SEND EMAIL USING GMAIL API
 # -------------------------------------------------------
 def send_gmail_message(user_email: str, to_addr: str, subject: str, message_body: str):
 
@@ -191,9 +196,6 @@ def send_gmail_message(user_email: str, to_addr: str, subject: str, message_body
     return response.json()
 
 
-# -------------------------------------------------------
-# Public API: Send Email
-# -------------------------------------------------------
 @app.post("/gmail/send")
 def gmail_send(request: SendEmailRequest):
     result = send_gmail_message(
@@ -206,7 +208,7 @@ def gmail_send(request: SendEmailRequest):
 
 
 # -------------------------------------------------------
-# Email Webhook → AI Reply Generator
+# STEP 4 — AI EMAIL REPLY WEBHOOK
 # -------------------------------------------------------
 @app.post("/webhook/email")
 async def process_email(payload: EmailPayload):
