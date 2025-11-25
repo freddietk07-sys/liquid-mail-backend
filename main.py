@@ -49,7 +49,7 @@ class SendEmailRequest(BaseModel):
 def safe_record(record: dict):
     clean = {}
     for k, v in record.items():
-        if isinstance(v, int) and abs(v) > 2_147_483_647:  # convert bigint → int
+        if isinstance(v, int) and abs(v) > 2_147_483_647:
             clean[k] = int(v)
         else:
             clean[k] = v
@@ -101,7 +101,7 @@ async def gmail_callback(code: str):
 
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=int(tokens["expires_in"]))
 
-    # TODO: replace with real users later
+    # TODO: Replace this with dynamic user management later
     user_email = "prod.tkmusic@gmail.com"
 
     supabase.table("gmail_tokens").insert({
@@ -114,6 +114,27 @@ async def gmail_callback(code: str):
     }).execute()
 
     return {"status": "saved", "email": user_email}
+
+
+# -------------------------------------------------------
+# STEP X — CHECK GMAIL CONNECTION STATUS (NEW)
+# -------------------------------------------------------
+@app.get("/auth/status")
+async def gmail_status():
+    # TODO: Later replace with real user identification
+    user_email = "prod.tkmusic@gmail.com"
+
+    result = (
+        supabase.table("gmail_tokens")
+        .select("id")
+        .eq("user_email", user_email)
+        .limit(1)
+        .execute()
+    )
+
+    gmail_connected = len(result.data) > 0
+
+    return {"gmailConnected": gmail_connected}
 
 
 # -------------------------------------------------------
@@ -134,7 +155,6 @@ def refresh_gmail_token(user_email: str):
 
     record = safe_record(result.data[0])
 
-    # Parse datetime from string → aware datetime
     stored_expiry = datetime.fromisoformat(record["expires_at"])
 
     if stored_expiry > datetime.now(timezone.utc):
